@@ -18,7 +18,7 @@ jobs:
       - name: Run SpeedTest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python zubo_github_actions.py
+        run: python py/zubo_github_actions.py
       - name: Commit results
         run: |
           git config --local user.email "action@github.com"
