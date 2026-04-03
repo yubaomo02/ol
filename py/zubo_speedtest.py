@@ -2,20 +2,19 @@ import os
 import re
 import asyncio
 import httpx
-import time
 from collections import OrderedDict
 
-# --- 配置区 ---
+# --- 配置 ---
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 REPO_OWNER = "yubaomo02"
 REPO_NAME = "ol"
 FOLDER_PATH = "zubo"
 
-TIMEOUT = 5.0          # 存活检测超时
-MAX_CONCURRENT = 50    # 并发数
+TIMEOUT = 5.0
+MAX_CONCURRENT = 100
 
-# 运营商/地域关键词
-REGION_KEYWORDS = ["联通", "电信", "移动", "广电", "教育网", "北京", "上海", "广东", "山东", "湖北", "江苏", "浙江", "重庆", "四川", "天津", "湖南"]
+# 关键词库：用于从原始 group-title 中提取有效信息
+REGION_KEYWORDS = ["电信", "联通", "移动", "广电", "北京", "上海", "天津", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南", "广东", "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海", "内蒙古", "广西", "西藏", "宁夏", "新疆"]
 
 CATEGORIES = OrderedDict([
     ("央视频道", ["CCTV1", "CCTV2", "CCTV3", "CCTV4", "CCTV4欧洲", "CCTV4美洲", "CCTV5", "CCTV5+", "CCTV6", "CCTV7", "CCTV8", "CCTV9", "CCTV10", "CCTV11", "CCTV12", "CCTV13", "CCTV14", "CCTV15", "CCTV16", "CCTV17", "CCTV4K", "CCTV8K", "兵器科技", "风云音乐", "风云足球", "风云剧场", "怀旧剧场", "第一剧场", "女性时尚", "世界地理", "央视台球", "高尔夫网球", "央视文化精品", "卫生健康", "电视指南"]),
@@ -27,25 +26,37 @@ CATEGORIES = OrderedDict([
 ])
 
 def clean_channel_name(name):
-    return re.sub(r'\(.*?\)|\[.*?\]|HD|高清|标清|超清|频道', '', name).strip()
+    return re.sub(r'\(.*?\)|\[.*?\]|HD|高清|标清|超清|频道|-', '', name).strip()
 
-def extract_provider(text):
-    """从 group-title 或名称中提取地域运营商"""
-    if not text: return "未知"
+def get_smart_provider(raw_line, filename):
+    """
+    智能提取：优先从 m3u 的 group-title 提取，
+    如果没有，则从文件名（如 '湖北电信.m3u'）中提取。
+    """
+    # 1. 尝试从 group-title 提取
+    g_match = re.search(r'group-title="(.*?)"', raw_line)
+    text_to_search = g_match.group(1) if g_match else ""
+    
+    # 2. 如果 group-title 没东西，用文件名兜底
+    if not any(kw in text_to_search for kw in REGION_KEYWORDS):
+        text_to_search = filename
+
+    # 3. 提取匹配到的关键词（如：湖北电信）
+    found_region = ""
+    found_isp = ""
     for kw in REGION_KEYWORDS:
-        if kw in text:
-            # 匹配类似 "北京联通" 或 "湖北电信" 这样连着的词，避开纯数字
-            match = re.search(r'([^\s_]*?(?:联通|电信|移动|广电|教育网)[^\s_]*)', text)
-            if match:
-                res = match.group(1)
-                # 剔除末尾的 IP 和端口
-                return re.sub(r'_[0-9\._]+$', '', res).strip()
-            return kw
-    return "未知"
+        if kw in text_to_search:
+            if kw in ["电信", "联通", "移动", "广电"]:
+                found_isp = kw
+            else:
+                found_region = kw
+    
+    res = f"{found_region}{found_isp}"
+    return res if res else "未知"
 
 async def check_link(client, ch):
-    """仅做基础连通性检测"""
     try:
+        # 使用 GET 请求只读头部，确认存活
         async with client.stream("GET", ch['url'], timeout=TIMEOUT) as resp:
             if resp.status_code == 200:
                 return ch
@@ -54,54 +65,41 @@ async def check_link(client, ch):
     return None
 
 async def main():
-    # 路径自动修正：确保文件写在仓库根目录
-    if os.path.basename(os.getcwd()) == 'py':
-        os.chdir('..')
-
+    if os.path.basename(os.getcwd()) == 'py': os.chdir('..')
+    
     headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, verify=False) as client:
-        # 1. 获取文件列表
+        # 第一步：获取文件列表
         api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FOLDER_PATH}"
         resp = await client.get(api_url)
-        if resp.status_code != 200:
-            print(f"❌ API Error: {resp.status_code}")
-            return
+        if resp.status_code != 200: return
         
-        m3u_files = [f['download_url'] for f in resp.json() if f['name'].endswith('.m3u')]
-        print(f"📂 找到 {len(m3u_files)} 个 M3U 文件")
-
-        # 2. 解析
+        files_data = [f for f in resp.json() if f['name'].endswith('.m3u')]
+        
+        # 第二步：反向遍历 zubo 文件夹原始文件，抓取频道+归属地
         all_channels = []
-        for file_url in m3u_files:
-            try:
-                r = await client.get(file_url)
-                lines = [l.strip() for l in r.text.split('\n') if l.strip()]
-                for i, line in enumerate(lines):
-                    if line.startswith("#EXTINF:"):
-                        # 提取原始 group-title
-                        raw_group = ""
-                        g_match = re.search(r'group-title="(.*?)"', line)
-                        if g_match:
-                            raw_group = g_match.group(1)
-                        
-                        provider = extract_provider(raw_group)
-                        name = line.split(',')[-1].strip()
-                        
-                        if i + 1 < len(lines):
-                            u = lines[i+1]
-                            if u.startswith("http"):
-                                all_channels.append({
-                                    "name": name, 
-                                    "url": u, 
-                                    "provider": provider, 
-                                    "pure": clean_channel_name(name)
-                                })
-            except:
-                continue
+        for f in files_data:
+            print(f"📖 正在解析原始文件: {f['name']}")
+            r = await client.get(f['download_url'])
+            lines = [l.strip() for l in r.text.split('\n') if l.strip()]
+            for i, line in enumerate(lines):
+                if line.startswith("#EXTINF:"):
+                    # 关键点：传入原始行和文件名来锁定运营商
+                    provider = get_smart_provider(line, f['name'])
+                    name = line.split(',')[-1].strip()
+                    
+                    if i + 1 < len(lines) and lines[i+1].startswith("http"):
+                        all_channels.append({
+                            "name": name,
+                            "url": lines[i+1],
+                            "provider": provider,
+                            "pure": clean_channel_name(name)
+                        })
 
-        # 3. 过滤并检测
+        # 第三步：分类匹配与存活检测
         valid_set = set([n for sub in CATEGORIES.values() for n in sub])
         to_check = [ch for ch in all_channels if ch['pure'] in valid_set]
+        print(f"🔍 匹配到分类列表共 {len(to_check)} 个源，开始检测存活...")
         
         sem = asyncio.Semaphore(MAX_CONCURRENT)
         async def task(ch):
@@ -110,7 +108,7 @@ async def main():
         results = await asyncio.gather(*(task(ch) for ch in to_check))
         valid_results = [r for r in results if r]
 
-        # 4. 分类汇总
+        # 第四步：输出汇总
         final_data = OrderedDict({cat: [] for cat in CATEGORIES})
         for r in valid_results:
             for cat, names in CATEGORIES.items():
@@ -118,33 +116,23 @@ async def main():
                     final_data[cat].append(r)
                     break
 
-        # 5. 生成 TXT
-        txt_lines = []
-        for cat, channels in final_data.items():
-            if channels:
-                txt_lines.append(f"{cat},#genre#")
-                # 按照 名称,URL$运营商 格式去重
-                unique_set = set()
-                for c in channels:
-                    line = f"{c['name']},{c['url']}${c['provider']}"
-                    unique_set.add(line)
-                txt_lines.extend(sorted(list(unique_set)))
-                txt_lines.append("")
-
+        # 生成 TXT
         with open("zubo_live.txt", "w", encoding="utf-8") as f:
-            f.write("\n".join(txt_lines))
+            for cat, channels in final_data.items():
+                if channels:
+                    f.write(f"{cat},#genre#\n")
+                    # 去重：URL + 运营商 组合
+                    unique_lines = list({f"{c['name']},{c['url']}${c['provider']}": None for c in channels}.keys())
+                    f.write("\n".join(sorted(unique_lines)) + "\n\n")
 
-        # 6. 生成 M3U
-        m3u_lines = ["#EXTM3U"]
-        for cat, channels in final_data.items():
-            for c in channels:
-                m3u_lines.append(f'#EXTINF:-1 group-title="{cat}",{c["name"]}')
-                m3u_lines.append(c["url"])
-        
+        # 生成 M3U
         with open("zubo_live.m3u", "w", encoding="utf-8") as f:
-            f.write("\n".join(m3u_lines))
+            f.write("#EXTM3U\n")
+            for cat, channels in final_data.items():
+                for c in channels:
+                    f.write(f'#EXTINF:-1 group-title="{cat}",{c["name"]}\n{c["url"]}\n')
 
-    print(f"🏁 任务完成！生成有效频道: {len(valid_results)}")
+    print(f"✅ 处理完毕。存活源总数: {len(valid_results)}")
 
 if __name__ == "__main__":
     asyncio.run(main())
