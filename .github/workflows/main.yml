@@ -1,28 +1,37 @@
-name: Zubo SpeedTest
+name: Zubo Daily SpeedTest
 on:
   schedule:
-    - cron: '0 18 * * *' # 每天定时运行
-  workflow_dispatch:
+    - cron: '0 20 * * *' # 每天凌晨 4 点运行 (UTC时间+8)
+  workflow_dispatch:      # 允许手动在页面点击运行
+
+permissions:
+  contents: write         # 必须有这个权限才能 push 文件
 
 jobs:
-  run-script:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
+
       - name: Install dependencies
         run: pip install httpx
+
       - name: Run SpeedTest
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python py/zubo_github_actions.py
-      - name: Commit results
+        # 运行刚才写的脚本
+        run: python zubo_speedtest.py
+
+      - name: Commit and Push
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
           git add zubo_live.txt
-          git commit -m "Update speedtested live list" || exit 0
+          # 如果没有变化则不提交
+          git commit -m "Auto Update Speedtested List" || exit 0
           git push
