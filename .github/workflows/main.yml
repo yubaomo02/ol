@@ -30,7 +30,15 @@ jobs:
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
-          git add zubo_live.txt
-          # 如果没有变化则不提交
-          git commit -m "Auto Update Speedtested List" || exit 0
+          
+          # 关键点：使用 -A 确保把所有新建的 txt 和 m3u 都加进去
+          git add zubo_live.txt zubo_live.m3u
+          
+          # 检查是否有文件变化，防止在没有更新时报错导致任务显示失败
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          git commit -m "Auto Update: Gathered Live List"
           git push
