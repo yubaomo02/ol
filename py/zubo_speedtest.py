@@ -10,9 +10,8 @@ REPO_OWNER = "yubaomo02"
 REPO_NAME = "ol"
 FOLDER_PATH = "zubo"
 
-# 仅检测链接是否可以连接 (HEAD 请求)，超时设短一点
-TIMEOUT = 3.0 
-MAX_CONCURRENT = 100 # 不做下载，并发可以开大
+TIMEOUT = 5.0 
+MAX_CONCURRENT = 50 
 
 CATEGORIES = OrderedDict([
     ("央视频道", ["CCTV1", "CCTV2", "CCTV3", "CCTV4", "CCTV4欧洲", "CCTV4美洲", "CCTV5", "CCTV5+", "CCTV6", "CCTV7", "CCTV8", "CCTV9", "CCTV10", "CCTV11", "CCTV12", "CCTV13", "CCTV14", "CCTV15", "CCTV16", "CCTV17", "CCTV4K", "CCTV8K", "兵器科技", "风云音乐", "风云足球", "风云剧场", "怀旧剧场", "第一剧场", "女性时尚", "世界地理", "央视台球", "高尔夫网球", "央视文化精品", "卫生健康", "电视指南"]),
@@ -31,78 +30,94 @@ def clean_suffix(suffix):
     return re.sub(r'_[0-9\._]+$', '', suffix).strip()
 
 async def check_link(client, ch, idx, total):
-    """仅做存活检测 (HEAD请求)"""
     try:
-        # 使用 HEAD 请求只拿响应头，不下载内容，速度极快
-        resp = await client.head(ch['url'], timeout=TIMEOUT)
-        if resp.status_code == 200:
-            print(f"[{idx}/{total}] ✅ 有效: {ch['name']}", flush=True)
-            return ch
+        # 改用 GET 并只读取极小数据，兼容性比 HEAD 更好
+        async with client.stream("GET", ch['url'], timeout=TIMEOUT) as resp:
+            if resp.status_code == 200:
+                return ch
     except:
         pass
     return None
 
 async def main():
+    # 确保在根目录生成文件
+    os.chdir(os.path.join(os.getcwd(), '..')) if os.path.basename(os.getcwd()) == 'py' else None
+    
     headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, verify=False) as client:
         # 1. 获取文件列表
         api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FOLDER_PATH}"
         resp = await client.get(api_url)
-        if resp.status_code != 200: return
+        if resp.status_code != 200:
+            print(f"❌ API 请求失败: {resp.status_code}")
+            return
         
-        m3u_urls = [f['download_url'] for f in resp.json() if f['name'].endswith('.m3u')]
-        
+        m3u_files = [f for f in resp.json() if f['name'].endswith('.m3u')]
+        print(f"📂 找到 {len(m3u_files)} 个 M3U 文件")
+
         # 2. 解析
         all_channels = []
-        for url in m3u_urls:
-            r = await client.get(url)
-            for line in r.text.split('\n'):
+        for f_info in m3u_files:
+            r = await client.get(f_info['download_url'])
+            lines = [l.strip() for l in r.text.split('\n') if l.strip()]
+            for i, line in enumerate(lines):
                 if line.startswith("#EXTINF:"):
                     suffix = "未知"
                     g_match = re.search(r'group-title="(.*?)"', line)
                     if g_match: suffix = clean_suffix(g_match.group(1))
                     name = line.split(',')[-1].strip()
-                    idx = r.text.split('\n').index(line)
-                    u = r.text.split('\n')[idx+1].strip()
-                    if u.startswith("http"):
-                        all_channels.append({"name": name, "url": u, "suffix": suffix, "pure": clean_channel_name(name)})
+                    if i + 1 < len(lines):
+                        u = lines[i+1]
+                        if u.startswith("http"):
+                            all_channels.append({"name": name, "url": u, "suffix": suffix, "pure": clean_channel_name(name)})
+        
+        print(f"总计解析到 {len(all_channels)} 条原始频道")
 
         # 3. 过滤
-        valid_set = set([n for sub in CATEGORIES.values() for n in sub])
-        to_check = [ch for ch in all_channels if ch['pure'] in valid_set]
-        
+        valid_names = set([n for sub in CATEGORIES.values() for n in sub])
+        to_check = [ch for ch in all_channels if ch['pure'] in valid_names]
+        print(f"🎯 匹配到分类关键词的频道数: {len(to_check)}")
+
         # 4. 存活检测
         sem = asyncio.Semaphore(MAX_CONCURRENT)
         async def task(ch, i):
             async with sem: return await check_link(client, ch, i, len(to_check))
         
         results = await asyncio.gather(*(task(ch, i+1) for i, ch in enumerate(to_check)))
-        results = [r for r in results if r]
+        valid_results = [r for r in results if r]
+        print(f"✅ 存活检测完成，有效频道: {len(valid_results)}")
 
-        # 5. 生成结果
+        # 5. 整理数据
         final_data = OrderedDict({cat: [] for cat in CATEGORIES})
-        for r in results:
+        for r in valid_results:
             for cat, names in CATEGORIES.items():
                 if r['pure'] in names:
                     final_data[cat].append(r)
                     break
 
         # --- 输出 TXT ---
+        txt_content = []
+        for cat, channels in final_data.items():
+            if channels:
+                txt_content.append(f"{cat},#genre#")
+                unique = list({f"{c['name']},{c['url']}${c['suffix']}": None for c in channels}.keys())
+                txt_content.extend(sorted(unique))
+                txt_content.append("")
+        
         with open("zubo_live.txt", "w", encoding="utf-8") as f:
-            for cat, channels in final_data.items():
-                if channels:
-                    f.write(f"{cat},#genre#\n")
-                    unique = list({f"{c['name']},{c['url']}${c['suffix']}": None for c in channels}.keys())
-                    f.write("\n".join(sorted(unique)) + "\n\n")
+            f.write("\n".join(txt_content))
 
         # --- 输出 M3U ---
+        m3u_content = ["#EXTM3U"]
+        for cat, channels in final_data.items():
+            for c in channels:
+                m3u_content.append(f'#EXTINF:-1 group-title="{cat}",{c["name"]}')
+                m3u_content.append(c["url"])
+        
         with open("zubo_live.m3u", "w", encoding="utf-8") as f:
-            f.write("#EXTM3U\n")
-            for cat, channels in final_data.items():
-                for c in channels:
-                    f.write(f'#EXTINF:-1 group-title="{cat}",{c["name"]}\n{c["url"]}\n')
+            f.write("\n".join(m3u_content))
 
-    print("🏁 汇总完成：zubo_live.txt 和 zubo_live.m3u 已生成。")
+    print(f"💾 文件写入成功：zubo_live.txt ({len(txt_content)}行), zubo_live.m3u ({len(m3u_content)}行)")
 
 if __name__ == "__main__":
     asyncio.run(main())
