@@ -25,7 +25,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         # 运行刚才写的脚本
-        run: python zubo_speedtest.py
+        run: python py/zubo_speedtest.py
 
       - name: Commit and Push
         run: |
