@@ -1,0 +1,28 @@
+name: Zubo SpeedTest
+on:
+  schedule:
+    - cron: '0 18 * * *' # 每天定时运行
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      - name: Install dependencies
+        run: pip install httpx
+      - name: Run SpeedTest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python zubo_github_actions.py
+      - name: Commit results
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add zubo_live.txt
+          git commit -m "Update speedtested live list" || exit 0
+          git push
