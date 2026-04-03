@@ -23,23 +23,24 @@ CATEGORIES = OrderedDict([
 ])
 
 def clean_channel_name(name):
-    return re.sub(r'\(.*?\)|\[.*?\]|HD|高清|标清|超清|频道|-', '', name).strip()
+    # 清理掉名称中自带的地域和多余后缀
+    name = re.sub(r'\(.*?\)|\[.*?\]|HD|高清|标清|超清|频道|-', '', name)
+    return name.strip()
 
 def get_smart_provider(raw_line, filename):
     """
-    反向思路：直接屏蔽原文件名/标签中的数字和符号，提取纯文字
+    提取地名并彻底清除 .m3u 相关干扰
     """
     g_match = re.search(r'group-title="(.*?)"', raw_line)
     text = g_match.group(1) if g_match else ""
-    
-    # 只要 group-title 为空或包含“未知”，就用文件名
     if not text or "未知" in text:
         text = filename
 
-    # 屏蔽：数字 \d, 点 \., 下划线 _, 横杠 -, 冒号 :
-    # 同时去掉 .m3u 后缀
+    # 1. 移除后缀 .m3u (不留痕迹)
+    text = re.sub(r'\.m3u$', '', text, flags=re.IGNORECASE)
+    # 2. 屏蔽数字、点、下划线、端口号、rtp
     clean_text = re.sub(r'[\d\._\-:]+', '', text)
-    clean_text = clean_text.replace('m3u', '').replace('rtp', '').strip()
+    clean_text = clean_text.replace('rtp', '').replace('m3u', '').strip()
     
     return clean_text if clean_text else "未知"
 
@@ -57,7 +58,6 @@ async def main():
     
     headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, verify=False) as client:
-        # 1. 获取文件列表
         api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FOLDER_PATH}"
         resp = await client.get(api_url)
         if resp.status_code != 200: return
@@ -66,15 +66,12 @@ async def main():
         
         all_channels = []
         for f in files_data:
-            print(f"📖 提取文件名文字: {f['name']}")
             r = await client.get(f['download_url'])
             lines = [l.strip() for l in r.text.split('\n') if l.strip()]
             for i, line in enumerate(lines):
                 if line.startswith("#EXTINF:"):
-                    # 使用屏蔽数字法提取地名
                     provider = get_smart_provider(line, f['name'])
                     name = line.split(',')[-1].strip()
-                    
                     if i + 1 < len(lines) and lines[i+1].startswith("http"):
                         all_channels.append({
                             "name": name,
@@ -83,7 +80,6 @@ async def main():
                             "pure": clean_channel_name(name)
                         })
 
-        # 2. 存活检测
         valid_set = set([n for sub in CATEGORIES.values() for n in sub])
         to_check = [ch for ch in all_channels if ch['pure'] in valid_set]
         
@@ -94,7 +90,6 @@ async def main():
         results = await asyncio.gather(*(task(ch) for ch in to_check))
         valid_results = [r for r in results if r]
 
-        # 3. 输出
         final_data = OrderedDict({cat: [] for cat in CATEGORIES})
         for r in valid_results:
             for cat, names in CATEGORIES.items():
@@ -102,20 +97,24 @@ async def main():
                     final_data[cat].append(r)
                     break
 
+        # 生成 TXT (URL$地名 格式)
         with open("zubo_live.txt", "w", encoding="utf-8") as f:
             for cat, channels in final_data.items():
                 if channels:
                     f.write(f"{cat},#genre#\n")
-                    unique_lines = list({f"{c['name']},{c['url']}${c['provider']}": None for c in channels}.keys())
+                    unique_lines = list({f"{c['pure']},{c['url']}${c['provider']}": None for c in channels}.keys())
                     f.write("\n".join(sorted(unique_lines)) + "\n\n")
 
+        # 生成 M3U (在名称后加标识)
         with open("zubo_live.m3u", "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
             for cat, channels in final_data.items():
                 for c in channels:
-                    f.write(f'#EXTINF:-1 group-title="{cat}",{c["name"]}\n{c["url"]}\n')
+                    # 将地域信息加在名称后面，方便播放器显示
+                    display_name = f"{c['pure']}-{c['provider']}"
+                    f.write(f'#EXTINF:-1 group-title="{cat}",{display_name}\n{c["url"]}\n')
 
-    print(f"✅ 任务完成！存活频道: {len(valid_results)}")
+    print(f"✅ 汇总完成！已清除多余mu标签并优化M3U格式。")
 
 if __name__ == "__main__":
     asyncio.run(main())
