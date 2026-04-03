@@ -13,10 +13,6 @@ FOLDER_PATH = "zubo"
 TIMEOUT = 5.0
 MAX_CONCURRENT = 100
 
-# 拆分关键词库，方便精确组合
-REGIONS = ["北京", "上海", "天津", "重庆", "河北", "山西", "辽宁", "吉林", "黑龙江", "江苏", "浙江", "安徽", "福建", "江西", "山东", "河南", "湖北", "湖南", "广东", "海南", "四川", "贵州", "云南", "陕西", "甘肃", "青海", "内蒙古", "广西", "西藏", "宁夏", "新疆"]
-ISPS = ["电信", "联通", "移动", "广电", "教育网"]
-
 CATEGORIES = OrderedDict([
     ("央视频道", ["CCTV1", "CCTV2", "CCTV3", "CCTV4", "CCTV4欧洲", "CCTV4美洲", "CCTV5", "CCTV5+", "CCTV6", "CCTV7", "CCTV8", "CCTV9", "CCTV10", "CCTV11", "CCTV12", "CCTV13", "CCTV14", "CCTV15", "CCTV16", "CCTV17", "CCTV4K", "CCTV8K", "兵器科技", "风云音乐", "风云足球", "风云剧场", "怀旧剧场", "第一剧场", "女性时尚", "世界地理", "央视台球", "高尔夫网球", "央视文化精品", "卫生健康", "电视指南"]),
     ("卫视频道", ["湖南卫视", "浙江卫视", "江苏卫视", "东方卫视", "深圳卫视", "北京卫视", "广东卫视", "广西卫视", "东南卫视", "海南卫视", "河北卫视", "河南卫视", "湖北卫视", "江西卫视", "四川卫视", "重庆卫视", "贵州卫视", "云南卫视", "天津卫视", "安徽卫视", "山东卫视", "辽宁卫视", "黑龙江卫视", "吉林卫视", "内蒙古卫视", "宁夏卫视", "山西卫视", "陕西卫视", "甘肃卫视", "青海卫视", "新疆卫视", "西藏卫视", "三沙卫视", "山东教育卫视", "中国教育1台", "中国教育2台", "中国教育3台", "中国教育4台", "早期教育"]),
@@ -31,30 +27,21 @@ def clean_channel_name(name):
 
 def get_smart_provider(raw_line, filename):
     """
-    强化提取：扫描地名 + 运营商的组合
+    反向思路：直接屏蔽原文件名/标签中的数字和符号，提取纯文字
     """
     g_match = re.search(r'group-title="(.*?)"', raw_line)
     text = g_match.group(1) if g_match else ""
     
-    # 如果 group-title 没信息，就看文件名
-    if not any(kw in text for kw in REGIONS + ISPS):
+    # 只要 group-title 为空或包含“未知”，就用文件名
+    if not text or "未知" in text:
         text = filename
 
-    found_region = ""
-    found_isp = ""
+    # 屏蔽：数字 \d, 点 \., 下划线 _, 横杠 -, 冒号 :
+    # 同时去掉 .m3u 后缀
+    clean_text = re.sub(r'[\d\._\-:]+', '', text)
+    clean_text = clean_text.replace('m3u', '').replace('rtp', '').strip()
     
-    for r in REGIONS:
-        if r in text:
-            found_region = r
-            break
-    for i in ISPS:
-        if i in text:
-            found_isp = i
-            break
-            
-    if found_region or found_isp:
-        return f"{found_region}{found_isp}"
-    return "未知"
+    return clean_text if clean_text else "未知"
 
 async def check_link(client, ch):
     try:
@@ -79,12 +66,12 @@ async def main():
         
         all_channels = []
         for f in files_data:
-            print(f"📖 解析原始文件: {f['name']}")
+            print(f"📖 提取文件名文字: {f['name']}")
             r = await client.get(f['download_url'])
             lines = [l.strip() for l in r.text.split('\n') if l.strip()]
             for i, line in enumerate(lines):
                 if line.startswith("#EXTINF:"):
-                    # 关键修改：提取 地名+运营商
+                    # 使用屏蔽数字法提取地名
                     provider = get_smart_provider(line, f['name'])
                     name = line.split(',')[-1].strip()
                     
@@ -107,7 +94,7 @@ async def main():
         results = await asyncio.gather(*(task(ch) for ch in to_check))
         valid_results = [r for r in results if r]
 
-        # 3. 分类与输出
+        # 3. 输出
         final_data = OrderedDict({cat: [] for cat in CATEGORIES})
         for r in valid_results:
             for cat, names in CATEGORIES.items():
@@ -115,7 +102,6 @@ async def main():
                     final_data[cat].append(r)
                     break
 
-        # 生成 TXT
         with open("zubo_live.txt", "w", encoding="utf-8") as f:
             for cat, channels in final_data.items():
                 if channels:
@@ -123,14 +109,13 @@ async def main():
                     unique_lines = list({f"{c['name']},{c['url']}${c['provider']}": None for c in channels}.keys())
                     f.write("\n".join(sorted(unique_lines)) + "\n\n")
 
-        # 生成 M3U
         with open("zubo_live.m3u", "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
             for cat, channels in final_data.items():
                 for c in channels:
                     f.write(f'#EXTINF:-1 group-title="{cat}",{c["name"]}\n{c["url"]}\n')
 
-    print(f"✅ 汇总完成！存活频道: {len(valid_results)}")
+    print(f"✅ 任务完成！存活频道: {len(valid_results)}")
 
 if __name__ == "__main__":
     asyncio.run(main())
