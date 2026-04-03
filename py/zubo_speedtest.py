@@ -23,22 +23,22 @@ CATEGORIES = OrderedDict([
 ])
 
 def clean_channel_name(name):
-    # 清理掉名称中自带的地域和多余后缀
+    # 彻底去除名称里的杂质
     name = re.sub(r'\(.*?\)|\[.*?\]|HD|高清|标清|超清|频道|-', '', name)
     return name.strip()
 
 def get_smart_provider(raw_line, filename):
     """
-    提取地名并彻底清除 .m3u 相关干扰
+    提取地名，移除所有 IP、端口、数字、下划线、rtp 以及 .m3u
     """
     g_match = re.search(r'group-title="(.*?)"', raw_line)
     text = g_match.group(1) if g_match else ""
     if not text or "未知" in text:
         text = filename
 
-    # 1. 移除后缀 .m3u (不留痕迹)
+    # 1. 移除后缀
     text = re.sub(r'\.m3u$', '', text, flags=re.IGNORECASE)
-    # 2. 屏蔽数字、点、下划线、端口号、rtp
+    # 2. 强力清理非文字字符
     clean_text = re.sub(r'[\d\._\-:]+', '', text)
     clean_text = clean_text.replace('rtp', '').replace('m3u', '').strip()
     
@@ -58,6 +58,7 @@ async def main():
     
     headers = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
     async with httpx.AsyncClient(headers=headers, follow_redirects=True, verify=False) as client:
+        # 获取文件
         api_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{FOLDER_PATH}"
         resp = await client.get(api_url)
         if resp.status_code != 200: return
@@ -71,15 +72,16 @@ async def main():
             for i, line in enumerate(lines):
                 if line.startswith("#EXTINF:"):
                     provider = get_smart_provider(line, f['name'])
-                    name = line.split(',')[-1].strip()
+                    raw_name = line.split(',')[-1].strip()
                     if i + 1 < len(lines) and lines[i+1].startswith("http"):
                         all_channels.append({
-                            "name": name,
+                            "name": raw_name,
                             "url": lines[i+1],
                             "provider": provider,
-                            "pure": clean_channel_name(name)
+                            "pure": clean_channel_name(raw_name)
                         })
 
+        # 过滤与检测
         valid_set = set([n for sub in CATEGORIES.values() for n in sub])
         to_check = [ch for ch in all_channels if ch['pure'] in valid_set]
         
@@ -97,24 +99,23 @@ async def main():
                     final_data[cat].append(r)
                     break
 
-        # 生成 TXT (URL$地名 格式)
+        # 1. 生成 TXT (保持带 $标签 的格式)
         with open("zubo_live.txt", "w", encoding="utf-8") as f:
             for cat, channels in final_data.items():
                 if channels:
                     f.write(f"{cat},#genre#\n")
-                    unique_lines = list({f"{c['pure']},{c['url']}${c['provider']}": None for c in channels}.keys())
-                    f.write("\n".join(sorted(unique_lines)) + "\n\n")
+                    unique_txt = list({f"{c['pure']},{c['url']}${c['provider']}": None for c in channels}.keys())
+                    f.write("\n".join(sorted(unique_txt)) + "\n\n")
 
-        # 生成 M3U (在名称后加标识)
+        # 2. 生成 M3U (退回到纯净格式，不带地域后缀)
         with open("zubo_live.m3u", "w", encoding="utf-8") as f:
             f.write("#EXTM3U\n")
             for cat, channels in final_data.items():
                 for c in channels:
-                    # 将地域信息加在名称后面，方便播放器显示
-                    display_name = f"{c['pure']}-{c['provider']}"
-                    f.write(f'#EXTINF:-1 group-title="{cat}",{display_name}\n{c["url"]}\n')
+                    # 这里恢复成最简单的样式
+                    f.write(f'#EXTINF:-1 group-title="{cat}",{c["pure"]}\n{c["url"]}\n')
 
-    print(f"✅ 汇总完成！已清除多余mu标签并优化M3U格式。")
+    print(f"✅ 处理完成！TXT带标签，M3U已恢复纯净格式。")
 
 if __name__ == "__main__":
     asyncio.run(main())
